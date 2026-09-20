@@ -1,0 +1,1901 @@
+﻿Creator Business Hub - Software Requirements Specification
+Technical Implementation Guide for Cursor AI
+________________
+
+
+PROJECT OVERVIEW
+Product Name: Creator Business Hub
+Version: 1.0 MVP
+Target Completion: 12 weeks
+Architecture: Next.js 14 Modular Monolith → Microservices
+Deployment: Vercel + Supabase
+________________
+
+
+TECHNICAL STACK
+Frontend
+* Framework: Next.js 14 (App Router, TypeScript)
+* Styling: Tailwind CSS + shadcn/ui
+* State: Zustand
+* Charts: Recharts
+* Forms: React Hook Form + Zod
+* Auth: Auth0 SDK
+Backend
+* Runtime: Node.js 18+ (TypeScript)
+* API: Next.js API Routes (RESTful)
+* Validation: Zod schemas
+* Architecture: Service Layer Pattern
+Database
+* Primary: PostgreSQL 15+ (Supabase)
+* Cache: Redis (Upstash)
+* ORM: Supabase JS Client
+Infrastructure
+* Hosting: Vercel (serverless)
+* Database: Supabase (managed Postgres)
+* Monitoring: Sentry + Vercel Analytics
+* Logging: Axiom
+________________
+
+
+DATABASE SCHEMA
+Core Tables
+users
+sql
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  auth0_id VARCHAR(255) UNIQUE NOT NULL,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  full_name VARCHAR(255),
+  business_name VARCHAR(255),
+  entity_type VARCHAR(50) CHECK (entity_type IN ('sole_proprietor', 'llc', 's_corp')),
+  tax_id VARCHAR(20),
+  primary_currency VARCHAR(3) DEFAULT 'USD',
+  timezone VARCHAR(50) DEFAULT 'America/New_York',
+  country VARCHAR(2) DEFAULT 'US',
+  state VARCHAR(2),
+  subscription_tier VARCHAR(50) DEFAULT 'starter',
+  subscription_status VARCHAR(50) DEFAULT 'trialing',
+  onboarding_completed BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+CREATE INDEX idx_users_auth0_id ON users(auth0_id);
+CREATE INDEX idx_users_email ON users(email);
+transactions
+sql
+CREATE TABLE transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  amount DECIMAL(12,2) NOT NULL CHECK (amount > 0),
+  currency VARCHAR(3) DEFAULT 'USD',
+  type VARCHAR(20) NOT NULL CHECK (type IN ('income', 'expense')),
+  category VARCHAR(100) NOT NULL,
+  subcategory VARCHAR(100),
+  source VARCHAR(100),
+  source_id VARCHAR(255),
+  source_metadata JSONB,
+  description TEXT,
+  vendor_name VARCHAR(255),
+  tax_deductible BOOLEAN,
+  tax_category VARCHAR(100),
+  receipt_url TEXT,
+  invoice_id UUID REFERENCES invoices(id),
+  brand_deal_id UUID REFERENCES brand_deals(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+CREATE INDEX idx_transactions_user_id ON transactions(user_id);
+CREATE INDEX idx_transactions_date ON transactions(date DESC);
+CREATE INDEX idx_transactions_user_date ON transactions(user_id, date DESC);
+CREATE INDEX idx_transactions_type ON transactions(type);
+brand_deals
+sql
+CREATE TABLE brand_deals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  brand_name VARCHAR(255) NOT NULL,
+  contact_name VARCHAR(255),
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(50),
+  status VARCHAR(50) NOT NULL DEFAULT 'lead' 
+    CHECK (status IN ('lead', 'negotiating', 'contracted', 'delivered', 'paid', 'lost')),
+  deal_value DECIMAL(12,2),
+  currency VARCHAR(3) DEFAULT 'USD',
+  payment_terms VARCHAR(100),
+  contract_url TEXT,
+  contract_signed_date DATE,
+  deliverables JSONB DEFAULT '[]'::JSONB,
+  deal_date DATE,
+  due_date DATE,
+  completed_date DATE,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+CREATE INDEX idx_deals_user_id ON brand_deals(user_id);
+CREATE INDEX idx_deals_status ON brand_deals(status);
+CREATE INDEX idx_deals_user_status ON brand_deals(user_id, status);
+invoices
+sql
+CREATE TABLE invoices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  brand_deal_id UUID REFERENCES brand_deals(id),
+  invoice_number VARCHAR(50) UNIQUE NOT NULL,
+  invoice_date DATE NOT NULL,
+  due_date DATE NOT NULL,
+  bill_to_name VARCHAR(255) NOT NULL,
+  bill_to_email VARCHAR(255),
+  bill_to_address TEXT,
+  line_items JSONB NOT NULL DEFAULT '[]'::JSONB,
+  subtotal DECIMAL(12,2) NOT NULL,
+  tax_rate DECIMAL(5,2) DEFAULT 0,
+  tax_amount DECIMAL(12,2) DEFAULT 0,
+  total DECIMAL(12,2) NOT NULL,
+  currency VARCHAR(3) DEFAULT 'USD',
+  status VARCHAR(50) DEFAULT 'draft' 
+    CHECK (status IN ('draft', 'sent', 'viewed', 'paid', 'overdue', 'cancelled')),
+  payment_method VARCHAR(50),
+  payment_date DATE,
+  payment_transaction_id UUID REFERENCES transactions(id),
+  stripe_payment_link TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+CREATE INDEX idx_invoices_user_id ON invoices(user_id);
+CREATE INDEX idx_invoices_status ON invoices(status);
+CREATE INDEX idx_invoices_number ON invoices(invoice_number);
+platform_connections
+sql
+CREATE TABLE platform_connections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform VARCHAR(50) NOT NULL,
+  platform_user_id VARCHAR(255),
+  account_handle VARCHAR(255),
+  access_token TEXT,
+  refresh_token TEXT,
+  token_expiry TIMESTAMPTZ,
+  scopes TEXT[],
+  is_active BOOLEAN DEFAULT TRUE,
+  last_synced_at TIMESTAMPTZ,
+  sync_enabled BOOLEAN DEFAULT TRUE,
+  platform_metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, platform)
+);
+
+
+CREATE INDEX idx_connections_user_id ON platform_connections(user_id);
+analytics_snapshots
+sql
+CREATE TABLE analytics_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform_connection_id UUID REFERENCES platform_connections(id),
+  snapshot_date DATE NOT NULL,
+  platform VARCHAR(50) NOT NULL,
+  metrics JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, platform, snapshot_date)
+);
+
+
+CREATE INDEX idx_snapshots_user_platform_date 
+  ON analytics_snapshots(user_id, platform, snapshot_date DESC);
+tax_settings
+sql
+CREATE TABLE tax_settings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  filing_status VARCHAR(50),
+  state VARCHAR(2),
+  additional_states TEXT[],
+  standard_deduction DECIMAL(12,2),
+  estimated_other_deductions DECIMAL(12,2),
+  quarterly_estimated_tax DECIMAL(12,2),
+  send_quarterly_reminders BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id)
+);
+Row-Level Security Policies
+sql
+ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE brand_deals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE analytics_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tax_settings ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY user_isolation_transactions ON transactions
+  FOR ALL USING (auth.uid() = user_id);
+
+
+CREATE POLICY user_isolation_deals ON brand_deals
+  FOR ALL USING (auth.uid() = user_id);
+
+
+CREATE POLICY user_isolation_invoices ON invoices
+  FOR ALL USING (auth.uid() = user_id);
+
+
+CREATE POLICY user_isolation_connections ON platform_connections
+  FOR ALL USING (auth.uid() = user_id);
+
+
+CREATE POLICY user_isolation_snapshots ON analytics_snapshots
+  FOR ALL USING (auth.uid() = user_id);
+
+
+CREATE POLICY user_isolation_tax_settings ON tax_settings
+  FOR ALL USING (auth.uid() = user_id);
+```
+
+
+---
+
+
+## PROJECT STRUCTURE
+```
+creator-hub/
+├── app/
+│   ├── (auth)/
+│   │   ├── login/
+│   │   │   └── page.tsx
+│   │   ├── signup/
+│   │   │   └── page.tsx
+│   │   └── callback/
+│   │       └── page.tsx
+│   ├── (dashboard)/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx                    # Dashboard overview
+│   │   ├── transactions/
+│   │   │   ├── page.tsx                # List view
+│   │   │   └── [id]/
+│   │   │       └── page.tsx            # Detail view
+│   │   ├── deals/
+│   │   │   ├── page.tsx                # Kanban board
+│   │   │   └── [id]/
+│   │   │       └── page.tsx
+│   │   ├── invoices/
+│   │   │   ├── page.tsx
+│   │   │   ├── new/
+│   │   │   │   └── page.tsx
+│   │   │   └── [id]/
+│   │   │       └── page.tsx
+│   │   ├── tax/
+│   │   │   └── page.tsx
+│   │   ├── analytics/
+│   │   │   └── page.tsx
+│   │   └── settings/
+│   │       └── page.tsx
+│   ├── api/
+│   │   ├── auth/
+│   │   │   └── [...auth0]/
+│   │   │       └── route.ts
+│   │   ├── transactions/
+│   │   │   ├── route.ts                # GET, POST
+│   │   │   └── [id]/
+│   │   │       └── route.ts            # GET, PATCH, DELETE
+│   │   ├── deals/
+│   │   │   ├── route.ts
+│   │   │   └── [id]/
+│   │   │       └── route.ts
+│   │   ├── invoices/
+│   │   │   ├── route.ts
+│   │   │   ├── [id]/
+│   │   │   │   ├── route.ts
+│   │   │   │   └── pdf/
+│   │   │   │       └── route.ts
+│   │   │   └── generate-number/
+│   │   │       └── route.ts
+│   │   ├── tax/
+│   │   │   ├── estimate/
+│   │   │   │   └── route.ts
+│   │   │   ├── summary/
+│   │   │   │   └── route.ts
+│   │   │   └── settings/
+│   │   │       └── route.ts
+│   │   ├── analytics/
+│   │   │   ├── overview/
+│   │   │   │   └── route.ts
+│   │   │   └── [platform]/
+│   │   │       └── route.ts
+│   │   ├── integrations/
+│   │   │   ├── stripe/
+│   │   │   │   ├── connect/
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── webhook/
+│   │   │   │       └── route.ts
+│   │   │   └── youtube/
+│   │   │       └── connect/
+│   │   │           └── route.ts
+│   │   └── health/
+│   │       └── route.ts
+│   ├── layout.tsx
+│   ├── globals.css
+│   └── error.tsx
+├── lib/
+│   ├── services/
+│   │   ├── payment.service.ts
+│   │   ├── tax.service.ts
+│   │   ├── deal.service.ts
+│   │   ├── invoice.service.ts
+│   │   ├── analytics.service.ts
+│   │   └── user.service.ts
+│   ├── utils/
+│   │   ├── auth.ts
+│   │   ├── cache.ts
+│   │   ├── crypto.ts
+│   │   ├── formatting.ts
+│   │   ├── validation.ts
+│   │   ├── date.ts
+│   │   └── logger.ts
+│   ├── config/
+│   │   ├── constants.ts
+│   │   ├── categories.ts
+│   │   ├── features.ts
+│   │   └── tax-brackets.ts
+│   ├── types/
+│   │   ├── database.types.ts
+│   │   ├── api.types.ts
+│   │   └── models.ts
+│   ├── db/
+│   │   ├── supabase.ts
+│   │   └── redis.ts
+│   └── schemas/
+│       ├── transaction.schema.ts
+│       ├── deal.schema.ts
+│       ├── invoice.schema.ts
+│       └── user.schema.ts
+├── components/
+│   ├── ui/                             # shadcn/ui components
+│   │   ├── button.tsx
+│   │   ├── card.tsx
+│   │   ├── dialog.tsx
+│   │   ├── form.tsx
+│   │   ├── input.tsx
+│   │   ├── select.tsx
+│   │   ├── table.tsx
+│   │   └── ...
+│   ├── dashboard/
+│   │   ├── MetricCard.tsx
+│   │   ├── RevenueChart.tsx
+│   │   ├── ExpenseBreakdown.tsx
+│   │   ├── QuickActions.tsx
+│   │   └── RecentTransactions.tsx
+│   ├── transactions/
+│   │   ├── TransactionList.tsx
+│   │   ├── TransactionForm.tsx
+│   │   ├── TransactionFilters.tsx
+│   │   └── CategoryBadge.tsx
+│   ├── deals/
+│   │   ├── DealKanban.tsx
+│   │   ├── DealCard.tsx
+│   │   ├── DealForm.tsx
+│   │   └── DealDetails.tsx
+│   ├── invoices/
+│   │   ├── InvoiceList.tsx
+│   │   ├── InvoiceForm.tsx
+│   │   └── InvoicePreview.tsx
+│   ├── tax/
+│   │   ├── TaxEstimateCard.tsx
+│   │   ├── QuarterlyCalendar.tsx
+│   │   └── DeductionOptimizer.tsx
+│   ├── analytics/
+│   │   ├── PlatformCard.tsx
+│   │   ├── AudienceChart.tsx
+│   │   └── PerformanceTable.tsx
+│   └── shared/
+│       ├── Header.tsx
+│       ├── Sidebar.tsx
+│       ├── LoadingSpinner.tsx
+│       ├── ErrorBoundary.tsx
+│       ├── EmptyState.tsx
+│       └── ConfirmDialog.tsx
+├── scripts/
+│   ├── seed-demo.ts
+│   ├── migrate.ts
+│   └── backup.ts
+├── middleware.ts
+├── next.config.js
+├── tailwind.config.ts
+├── tsconfig.json
+├── package.json
+├── .env.local.example
+└── .gitignore
+________________
+
+
+FEATURE MODULES
+MODULE 1: Authentication & User Management
+Priority: P0 (Critical)
+Dependencies: None
+Estimated Time: Week 1
+Requirements
+1. Auth0 Integration
+   * Google OAuth login
+   * Email/password signup
+   * JWT token management
+   * Session handling
+2. User Profile
+   * Create user on signup
+   * Store auth0_id mapping
+   * Onboarding flow
+   * Profile settings
+API Endpoints
+POST /api/auth/callback
+* Handle Auth0 callback
+* Create or update user record
+* Set session cookie
+GET /api/users/me
+* Return current user profile
+* Include subscription info
+PATCH /api/users/me
+* Update user profile
+* Fields: business_name, entity_type, timezone
+POST /api/users/onboarding
+* Complete onboarding flow
+* Set onboarding_completed = true
+Validation Schemas
+typescript
+// lib/schemas/user.schema.ts
+import { z } from 'zod';
+
+
+export const updateUserSchema = z.object({
+  full_name: z.string().min(1).max(255).optional(),
+  business_name: z.string().min(1).max(255).optional(),
+  entity_type: z.enum(['sole_proprietor', 'llc', 's_corp']).optional(),
+  timezone: z.string().optional(),
+  state: z.string().length(2).optional(),
+});
+
+
+export const onboardingSchema = z.object({
+  business_name: z.string().min(1).max(255),
+  entity_type: z.enum(['sole_proprietor', 'llc', 's_corp']),
+  state: z.string().length(2),
+  timezone: z.string(),
+});
+Service Layer
+typescript
+// lib/services/user.service.ts
+
+
+export class UserService {
+  constructor(
+    private supabase: SupabaseClient,
+    private cache: Redis
+  ) {}
+
+
+  async createUser(auth0Id: string, email: string) {
+    // Create user record
+    // Return user object
+  }
+
+
+  async getUserByAuth0Id(auth0Id: string) {
+    // Check cache first
+    // Query database
+    // Cache result
+  }
+
+
+  async updateUser(userId: string, data: UpdateUserData) {
+    // Validate data
+    // Update database
+    // Invalidate cache
+  }
+
+
+  async completeOnboarding(userId: string, data: OnboardingData) {
+    // Update user record
+    // Set onboarding_completed = true
+    // Create tax_settings record
+  }
+}
+Authentication Middleware
+typescript
+// middleware.ts
+
+
+import { withMiddlewareAuthRequired } from '@auth0/nextjs-auth0/edge';
+
+
+export default withMiddlewareAuthRequired();
+
+
+export const config = {
+  matcher: [
+    '/dashboard/:path*',
+    '/api/((?!auth|health).*)',
+  ],
+};
+Utility Functions
+typescript
+// lib/utils/auth.ts
+
+
+export async function requireAuth(req: Request): Promise<string> {
+  // Extract user_id from JWT
+  // Throw UnauthorizedError if missing
+  // Return user_id
+}
+
+
+export async function getSession(req: Request) {
+  // Get session from Auth0
+  // Return user object
+}
+________________
+
+
+MODULE 2: Transaction Management
+Priority: P0 (Critical)
+Dependencies: Module 1
+Estimated Time: Week 2-3
+Requirements
+1. Manual Transaction Entry
+   * Create income/expense
+   * Upload receipts
+   * Categorize transactions
+   * Edit/delete transactions
+2. Transaction Listing
+   * Filter by type, category, date
+   * Pagination
+   * Sort by date, amount
+   * Search by description
+3. Stripe Integration
+   * OAuth connection flow
+   * Webhook handling
+   * Auto-sync transactions
+   * Auto-categorization
+API Endpoints
+GET /api/transactions
+* Query params: type, category, start_date, end_date, limit, offset
+* Return paginated list
+* Include total count
+POST /api/transactions
+* Create new transaction
+* Upload receipt to Supabase Storage
+* Auto-categorize based on rules
+* Return created transaction
+GET /api/transactions/[id]
+* Return single transaction
+* Include related entities (invoice, deal)
+PATCH /api/transactions/[id]
+* Update transaction
+* Validate ownership
+* Invalidate cache
+DELETE /api/transactions/[id]
+* Soft delete (set deleted_at)
+* Validate ownership
+* Invalidate cache
+POST /api/integrations/stripe/connect
+* Initiate Stripe Connect OAuth
+* Store connection details
+* Return redirect URL
+POST /api/integrations/stripe/webhook
+* Verify webhook signature
+* Handle charge.succeeded
+* Create transaction record
+* Return 200 OK
+Validation Schemas
+typescript
+// lib/schemas/transaction.schema.ts
+
+
+export const createTransactionSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount: z.number().positive().max(1000000),
+  currency: z.string().length(3).default('USD'),
+  type: z.enum(['income', 'expense']),
+  category: z.string().min(1).max(100),
+  subcategory: z.string().max(100).optional(),
+  description: z.string().max(500).optional(),
+  vendor_name: z.string().max(255).optional(),
+  receipt_url: z.string().url().optional(),
+  tax_deductible: z.boolean().optional(),
+  brand_deal_id: z.string().uuid().optional(),
+});
+
+
+export const updateTransactionSchema = createTransactionSchema.partial();
+
+
+export const transactionFiltersSchema = z.object({
+  type: z.enum(['income', 'expense']).optional(),
+  category: z.string().optional(),
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+  offset: z.coerce.number().int().nonnegative().default(0),
+});
+Service Layer
+typescript
+// lib/services/payment.service.ts
+
+
+export class PaymentService {
+  constructor(
+    private supabase: SupabaseClient,
+    private cache: Redis,
+    private logger: Logger
+  ) {}
+
+
+  async createTransaction(userId: string, data: CreateTransactionData) {
+    // Validate data
+    // Auto-categorize if needed
+    // Insert into database
+    // Invalidate cache
+    // Log event
+    // Return transaction
+  }
+
+
+  async getTransactions(userId: string, filters: TransactionFilters) {
+    // Build query with filters
+    // Apply pagination
+    // Execute query
+    // Return { data, total }
+  }
+
+
+  async getTransactionById(userId: string, transactionId: string) {
+    // Query with ownership check
+    // Return transaction or throw NotFoundError
+  }
+
+
+  async updateTransaction(userId: string, transactionId: string, data: UpdateTransactionData) {
+    // Validate ownership
+    // Update database
+    // Invalidate cache
+    // Log event
+  }
+
+
+  async deleteTransaction(userId: string, transactionId: string) {
+    // Validate ownership
+    // Soft delete
+    // Invalidate cache
+    // Log event
+  }
+
+
+  async categorizeTransaction(data: TransactionData): string {
+    // Rule-based categorization
+    // Check description against patterns
+    // Return category
+  }
+
+
+  async syncStripeTransactions(userId: string, connectionId: string) {
+    // Get Stripe connection
+    // Fetch recent charges
+    // Filter new transactions
+    // Bulk insert
+    // Return count
+  }
+
+
+  async handleStripeWebhook(event: Stripe.Event) {
+    // Verify signature
+    // Parse event type
+    // Switch on event type
+    // Create transaction if charge.succeeded
+    // Log event
+  }
+
+
+  private async invalidateCache(userId: string) {
+    // Delete cached dashboard data
+    // Delete cached transaction lists
+  }
+}
+Configuration
+typescript
+// lib/config/categories.ts
+
+
+export const INCOME_CATEGORIES = [
+  'ad_revenue',
+  'sponsorship',
+  'affiliate',
+  'merchandise',
+  'courses',
+  'donations',
+  'consulting',
+  'other',
+] as const;
+
+
+export const EXPENSE_CATEGORIES = [
+  'equipment',
+  'software',
+  'travel',
+  'marketing',
+  'office',
+  'professional_services',
+  'education',
+  'other',
+] as const;
+
+
+export const CATEGORY_PATTERNS = {
+  equipment: /camera|lens|mic|microphone|computer|laptop|ipad|lighting/i,
+  software: /adobe|canva|notion|clickup|slack|zoom|subscription/i,
+  travel: /flight|hotel|uber|lyft|airbnb|rental car/i,
+  marketing: /ads|facebook|instagram|tiktok|promotion/i,
+};
+________________
+
+
+MODULE 3: Brand Deal Management
+Priority: P0 (Critical)
+Dependencies: Module 1, Module 2
+Estimated Time: Week 4
+Requirements
+1. Deal Pipeline
+   * Kanban board (5 stages)
+   * Drag-and-drop status updates
+   * Deal creation/editing
+   * Deal notes
+2. Deliverables Tracking
+   * Add deliverables to deal
+   * Mark deliverables complete
+   * Due date reminders
+3. Deal → Transaction Link
+   * Auto-create transaction when status = "paid"
+   * Link existing transactions to deals
+API Endpoints
+GET /api/deals
+* Query param: status (optional)
+* Return deals grouped by status
+* Sort by created_at DESC
+POST /api/deals
+* Create new deal
+* Default status: "lead"
+* Return created deal
+GET /api/deals/[id]
+* Return single deal
+* Include transactions
+* Include invoices
+PATCH /api/deals/[id]
+* Update deal
+* If status changed to "paid", create transaction
+* Validate ownership
+* Return updated deal
+DELETE /api/deals/[id]
+* Soft delete
+* Validate ownership
+Validation Schemas
+typescript
+// lib/schemas/deal.schema.ts
+
+
+export const deliverableSchema = z.object({
+  type: z.string().min(1),
+  quantity: z.number().int().positive(),
+  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  completed: z.boolean().default(false),
+  completed_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  notes: z.string().optional(),
+});
+
+
+export const createDealSchema = z.object({
+  brand_name: z.string().min(1).max(255),
+  contact_name: z.string().max(255).optional(),
+  contact_email: z.string().email().optional(),
+  contact_phone: z.string().max(50).optional(),
+  status: z.enum(['lead', 'negotiating', 'contracted', 'delivered', 'paid', 'lost']).default('lead'),
+  deal_value: z.number().positive().optional(),
+  currency: z.string().length(3).default('USD'),
+  payment_terms: z.string().max(100).optional(),
+  deliverables: z.array(deliverableSchema).default([]),
+  deal_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  notes: z.string().optional(),
+});
+
+
+export const updateDealSchema = createDealSchema.partial();
+Service Layer
+typescript
+// lib/services/deal.service.ts
+
+
+export class DealService {
+  constructor(
+    private supabase: SupabaseClient,
+    private paymentService: PaymentService,
+    private logger: Logger
+  ) {}
+
+
+  async createDeal(userId: string, data: CreateDealData) {
+    // Validate data
+    // Insert into database
+    // Log event
+    // Return deal
+  }
+
+
+  async getDeals(userId: string, status?: string) {
+    // Query with optional status filter
+    // Group by status
+    // Return pipeline object
+  }
+
+
+  async getDealById(userId: string, dealId: string) {
+    // Query with ownership check
+    // Include related transactions
+    // Return deal or throw NotFoundError
+  }
+
+
+  async updateDeal(userId: string, dealId: string, data: UpdateDealData) {
+    // Validate ownership
+    // Get current deal
+    // Check if status changed to "paid"
+    // If yes, create transaction
+    // Update database
+    // Log event
+    // Return updated deal
+  }
+
+
+  async deleteDeal(userId: string, dealId: string) {
+    // Validate ownership
+    // Soft delete
+    // Log event
+  }
+
+
+  private async createTransactionFromDeal(userId: string, deal: BrandDeal) {
+    // Create transaction record
+    // Link to deal
+    // Set category = 'sponsorship'
+    // Amount = deal_value
+  }
+}
+________________
+
+
+MODULE 4: Tax Calculator
+Priority: P0 (Critical)
+Dependencies: Module 2
+Estimated Time: Week 5
+Requirements
+1. Quarterly Tax Estimate
+   * Calculate SE tax (15.3%)
+   * Calculate federal income tax
+   * Apply deductions
+   * Return quarterly payment amount
+2. Tax Settings
+   * Filing status
+   * State
+   * Estimated deductions
+   * Reminders preference
+3. Year-End Summary
+   * Total income
+   * Total deductible expenses
+   * Net income
+   * Estimated tax liability
+API Endpoints
+GET /api/tax/estimate
+* Query params: year, quarter
+* Calculate quarterly estimate
+* Return detailed breakdown
+GET /api/tax/summary
+* Query params: year
+* Calculate year-to-date summary
+* Return total income, expenses, tax
+GET /api/tax/settings
+* Return user's tax settings
+PUT /api/tax/settings
+* Update tax settings
+* Validate data
+* Return updated settings
+Validation Schemas
+typescript
+// lib/schemas/tax.schema.ts
+
+
+export const taxSettingsSchema = z.object({
+  filing_status: z.enum(['single', 'married_joint', 'married_separate', 'head_of_household']),
+  state: z.string().length(2),
+  additional_states: z.array(z.string().length(2)).default([]),
+  standard_deduction: z.number().nonnegative().optional(),
+  estimated_other_deductions: z.number().nonnegative().default(0),
+  quarterly_estimated_tax: z.number().nonnegative().optional(),
+  send_quarterly_reminders: z.boolean().default(true),
+});
+
+
+export const taxEstimateQuerySchema = z.object({
+  year: z.coerce.number().int().min(2020).max(2030),
+  quarter: z.coerce.number().int().min(1).max(4),
+});
+Service Layer
+typescript
+// lib/services/tax.
+Continue
+18:11
+service.ts
+export class TaxService { constructor( private supabase: SupabaseClient, private paymentService: PaymentService, private cache: Redis ) {}
+async calculateQuarterlyEstimate(userId: string, year: number, quarter: number) { // Check cache first // Get quarter date range // Fetch transactions in range // Calculate total income // Calculate deductible expenses // Calculate net income // Calculate SE tax // Calculate federal income tax // Calculate quarterly payment // Cache result // Return breakdown }
+async calculateYearSummary(userId: string, year: number) { // Get year date range // Fetch all transactions // Aggregate by category // Calculate totals // Calculate estimated tax // Return summary }
+async getTaxSettings(userId: string) { // Query tax_settings // Return or create default }
+async updateTaxSettings(userId: string, data: TaxSettingsData) { // Validate data // Upsert tax_settings // Invalidate cache // Return updated settings }
+private calculateSelfEmploymentTax(netIncome: number): number { // SE tax = netIncome * 0.9235 * 0.153 // Return amount }
+private calculateFederalIncomeTax(netIncome: number, filingStatus: string): number { // Get tax brackets for year // Calculate progressive tax // Return amount }
+private getQuarterDateRange(year: number, quarter: number): { start: string; end: string } { // Q1: Jan 1 - Mar 31 // Q2: Apr 1 - Jun 30 // Q3: Jul 1 - Sep 30 // Q4: Oct 1 - Dec 31 }
+private getQuarterlyDueDate(quarter: number): string { // Q1: Apr 15 // Q2: Jun 15 // Q3: Sep 15 // Q4: Jan 15 (next year) } }
+
+
+#### Configuration
+```typescript
+// lib/config/tax-brackets.ts
+
+
+export const TAX_BRACKETS_2026 = {
+  single: [
+    { max: 11000, rate: 0.10 },
+    { max: 44725, rate: 0.12 },
+    { max: 95375, rate: 0.22 },
+    { max: 182100, rate: 0.24 },
+    { max: 231250, rate: 0.32 },
+    { max: 578125, rate: 0.35 },
+    { max: Infinity, rate: 0.37 },
+  ],
+  married_joint: [
+    { max: 22000, rate: 0.10 },
+    { max: 89050, rate: 0.12 },
+    { max: 190750, rate: 0.22 },
+    { max: 364200, rate: 0.24 },
+    { max: 462500, rate: 0.32 },
+    { max: 693750, rate: 0.35 },
+    { max: Infinity, rate: 0.37 },
+  ],
+};
+
+
+export const SELF_EMPLOYMENT_TAX_RATE = 0.153;
+export const SE_DEDUCTION_RATE = 0.9235;
+```
+
+
+---
+
+
+### MODULE 5: Invoice Generation
+
+
+**Priority:** P1 (High)  
+**Dependencies:** Module 2, Module 3  
+**Estimated Time:** Week 6
+
+
+#### Requirements
+
+
+1. **Invoice Creation**
+   - Multi-line items
+   - Tax calculation
+   - Total calculation
+   - Link to brand deal
+
+
+2. **PDF Generation**
+   - Professional template
+   - Company branding
+   - Download capability
+
+
+3. **Invoice Status**
+   - Track: draft, sent, viewed, paid, overdue
+   - Payment recording
+   - Payment links (Stripe)
+
+
+#### API Endpoints
+
+
+**GET /api/invoices**
+- Query param: status (optional)
+- Return paginated list
+- Sort by invoice_date DESC
+
+
+**POST /api/invoices**
+- Create new invoice
+- Generate invoice number
+- Calculate totals
+- Return created invoice
+
+
+**GET /api/invoices/[id]**
+- Return single invoice
+- Include payment transaction
+
+
+**PATCH /api/invoices/[id]**
+- Update invoice
+- Recalculate totals
+- Validate ownership
+
+
+**GET /api/invoices/[id]/pdf**
+- Generate PDF
+- Return as download
+- Set content-disposition header
+
+
+**POST /api/invoices/[id]/send**
+- Mark as sent
+- Create Stripe payment link
+- Send email (Phase 2)
+
+
+**GET /api/invoices/generate-number**
+- Generate unique invoice number
+- Format: INV-YYYYMM-#### 
+- Return number
+
+
+#### Validation Schemas
+```typescript
+// lib/schemas/invoice.schema.ts
+
+
+export const lineItemSchema = z.object({
+  description: z.string().min(1).max(500),
+  quantity: z.number().int().positive(),
+  rate: z.number().positive(),
+  amount: z.number().positive(),
+});
+
+
+export const createInvoiceSchema = z.object({
+  brand_deal_id: z.string().uuid().optional(),
+  invoice_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  bill_to_name: z.string().min(1).max(255),
+  bill_to_email: z.string().email().optional(),
+  bill_to_address: z.string().optional(),
+  line_items: z.array(lineItemSchema).min(1),
+  tax_rate: z.number().nonnegative().max(100).default(0),
+  notes: z.string().optional(),
+});
+
+
+export const updateInvoiceSchema = createInvoiceSchema.partial().extend({
+  status: z.enum(['draft', 'sent', 'viewed', 'paid', 'overdue', 'cancelled']).optional(),
+  payment_method: z.string().optional(),
+  payment_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+```
+
+
+#### Service Layer
+```typescript
+// lib/services/invoice.service.ts
+
+
+export class InvoiceService {
+  constructor(
+    private supabase: SupabaseClient,
+    private paymentService: PaymentService,
+    private logger: Logger
+  ) {}
+
+
+  async createInvoice(userId: string, data: CreateInvoiceData) {
+    // Generate invoice number
+    // Calculate subtotal
+    // Calculate tax amount
+    // Calculate total
+    // Insert into database
+    // Log event
+    // Return invoice
+  }
+
+
+  async getInvoices(userId: string, status?: string) {
+    // Query with optional status filter
+    // Apply pagination
+    // Return invoices
+  }
+
+
+  async getInvoiceById(userId: string, invoiceId: string) {
+    // Query with ownership check
+    // Include payment transaction
+    // Return invoice or throw NotFoundError
+  }
+
+
+  async updateInvoice(userId: string, invoiceId: string, data: UpdateInvoiceData) {
+    // Validate ownership
+    // Recalculate totals if line_items changed
+    // Update database
+    // Log event
+    // Return updated invoice
+  }
+
+
+  async generatePDF(userId: string, invoiceId: string): Promise<Buffer> {
+    // Get invoice with user data
+    // Generate PDF using jsPDF
+    // Return buffer
+  }
+
+
+  async markAsSent(userId: string, invoiceId: string) {
+    // Update status to 'sent'
+    // Create Stripe payment link
+    // Update invoice with link
+    // Return updated invoice
+  }
+
+
+  async recordPayment(userId: string, invoiceId: string, paymentData: PaymentData) {
+    // Update invoice status to 'paid'
+    // Set payment_date, payment_method
+    // Create transaction record
+    // Link transaction to invoice
+    // Log event
+  }
+
+
+  async generateInvoiceNumber(userId: string): Promise<string> {
+    // Format: INV-YYYYMM-####
+    // Get current year/month
+    // Count invoices this month
+    // Increment and pad
+    // Return number
+  }
+
+
+  private calculateTotals(lineItems: LineItem[], taxRate: number) {
+    // Sum line items
+    // Calculate tax
+    // Calculate total
+    // Return { subtotal, taxAmount, total }
+  }
+}
+```
+
+
+---
+
+
+### MODULE 6: Analytics Dashboard
+
+
+**Priority:** P1 (High)  
+**Dependencies:** Module 2  
+**Estimated Time:** Week 7
+
+
+#### Requirements
+
+
+1. **Dashboard Overview**
+   - Revenue metrics (current month vs last month)
+   - Expense breakdown pie chart
+   - Recent transactions list
+   - Tax estimate alert
+   - Active deals count
+
+
+2. **Platform Analytics**
+   - YouTube metrics (mocked for MVP)
+   - Instagram metrics (mocked for MVP)
+   - Cross-platform comparison
+
+
+3. **Performance Charts**
+   - Revenue trend (line chart)
+   - Income by category (pie chart)
+   - Monthly comparison (bar chart)
+
+
+#### API Endpoints
+
+
+**GET /api/analytics/overview**
+- Return dashboard metrics
+- Current month revenue
+- Last month revenue
+- Total expenses
+- Active deals count
+- Next tax payment
+
+
+**GET /api/analytics/revenue-trend**
+- Query param: period (30d, 90d, 1y)
+- Return time-series data
+- Group by day/week/month
+
+
+**GET /api/analytics/expense-breakdown**
+- Query param: period
+- Return category breakdown
+- Calculate percentages
+
+
+**GET /api/analytics/youtube** (mocked)
+- Return static YouTube metrics
+- Subscribers, views, engagement
+
+
+**GET /api/analytics/instagram** (mocked)
+- Return static Instagram metrics
+- Followers, reach, engagement
+
+
+#### Service Layer
+```typescript
+// lib/services/analytics.service.ts
+
+
+export class AnalyticsService {
+  constructor(
+    private supabase: SupabaseClient,
+    private cache: Redis,
+    private paymentService: PaymentService,
+    private dealService: DealService
+  ) {}
+
+
+  async getDashboardOverview(userId: string) {
+    // Check cache
+    // Get current month date range
+    // Get last month date range
+    // Query transactions for both periods
+    // Calculate totals
+    // Get active deals count
+    // Get next tax payment
+    // Cache result (5 min TTL)
+    // Return overview
+  }
+
+
+  async getRevenueTrend(userId: string, period: string) {
+    // Parse period
+    // Get date range
+    // Query transactions
+    // Group by time period
+    // Return time-series data
+  }
+
+
+  async getExpenseBreakdown(userId: string, period: string) {
+    // Get date range
+    // Query expense transactions
+    // Group by category
+    // Calculate totals and percentages
+    // Return breakdown
+  }
+
+
+  async getYouTubeMetrics(userId: string) {
+    // For MVP: return mocked data
+    // Phase 2: call YouTube API
+    return {
+      subscribers: 150000,
+      views: 2500000,
+      videos: 120,
+      engagement_rate: 4.5,
+      avg_view_duration: 480,
+    };
+  }
+
+
+  async getInstagramMetrics(userId: string) {
+    // For MVP: return mocked data
+    // Phase 2: call Instagram API
+    return {
+      followers: 75000,
+      posts: 450,
+      engagement_rate: 3.2,
+      reach: 250000,
+    };
+  }
+
+
+  private groupTransactionsByPeriod(transactions: Transaction[], grouping: 'day' | 'week' | 'month') {
+    // Group transactions
+    // Sum amounts per period
+    // Return array of { date, amount }
+  }
+}
+```
+
+
+---
+
+
+## COMMON UTILITIES
+
+
+### Authentication Utilities
+```typescript
+// lib/utils/auth.ts
+
+
+export async function requireAuth(req: Request): Promise<string> {
+  const userId = req.headers.get('x-user-id');
+  if (!userId) {
+    throw new UnauthorizedError('Authentication required');
+  }
+  return userId;
+}
+
+
+export function createAuthMiddleware() {
+  return async (req: Request, next: () => Promise<Response>) => {
+    try {
+      const token = extractTokenFromHeader(req);
+      const decoded = await verifyJWT(token);
+      req.headers.set('x-user-id', decoded.user_id);
+      return await next();
+    } catch (err) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+  };
+}
+```
+
+
+### Cache Utilities
+```typescript
+// lib/utils/cache.ts
+
+
+export async function getCached<T>(
+  key: string,
+  fetcher: () => Promise<T>,
+  ttl: number = 300
+): Promise<T> {
+  const cached = await redis.get(key);
+  if (cached) {
+    return JSON.parse(cached) as T;
+  }
+  
+  const data = await fetcher();
+  await redis.setex(key, ttl, JSON.stringify(data));
+  return data;
+}
+
+
+export async function invalidateCache(pattern: string) {
+  const keys = await redis.keys(pattern);
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
+}
+
+
+export function cacheKey(prefix: string, ...parts: string[]): string {
+  return `${prefix}:${parts.join(':')}`;
+}
+```
+
+
+### Formatting Utilities
+```typescript
+// lib/utils/formatting.ts
+
+
+export function formatCurrency(amount: number, currency: string = 'USD'): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency,
+  }).format(amount);
+}
+
+
+export function formatDate(date: string | Date, format: 'short' | 'long' = 'short'): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  
+  if (format === 'short') {
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+  
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+
+export function formatPercentage(value: number, decimals: number = 1): string {
+  return `${(value * 100).toFixed(decimals)}%`;
+}
+```
+
+
+### Validation Utilities
+```typescript
+// lib/utils/validation.ts
+
+
+export function validateUUID(value: string): boolean {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(value);
+}
+
+
+export function validateDate(value: string): boolean {
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(value)) return false;
+  
+  const date = new Date(value);
+  return date instanceof Date && !isNaN(date.getTime());
+}
+
+
+export function sanitizeFilename(filename: string): string {
+  return filename.replace(/[^a-z0-9_\-\.]/gi, '_');
+}
+```
+
+
+### Logger Utility
+```typescript
+// lib/utils/logger.ts
+
+
+type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+
+
+interface LogEntry {
+  timestamp: string;
+  level: LogLevel;
+  event: string;
+  data?: any;
+  error?: any;
+}
+
+
+export class Logger {
+  log(level: LogLevel, event: string, data?: any, error?: any) {
+    const entry: LogEntry = {
+      timestamp: new Date().toISOString(),
+      level,
+      event,
+      data,
+      error: error ? {
+        message: error.message,
+        stack: error.stack,
+      } : undefined,
+    };
+    
+    console.log(JSON.stringify(entry));
+    
+    // In production: send to Axiom
+    if (process.env.NODE_ENV === 'production') {
+      // axiom.ingest('creator-hub', [entry]);
+    }
+  }
+  
+  info(event: string, data?: any) {
+    this.log('info', event, data);
+  }
+  
+  warn(event: string, data?: any) {
+    this.log('warn', event, data);
+  }
+  
+  error(event: string, error: Error, data?: any) {
+    this.log('error', event, data, error);
+  }
+  
+  debug(event: string, data?: any) {
+    if (process.env.NODE_ENV === 'development') {
+      this.log('debug', event, data);
+    }
+  }
+}
+
+
+export const logger = new Logger();
+```
+
+
+---
+
+
+## ERROR HANDLING
+
+
+### Custom Error Classes
+```typescript
+// lib/utils/errors.ts
+
+
+export class AppError extends Error {
+  constructor(
+    public statusCode: number,
+    public message: string,
+    public isOperational: boolean = true
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, AppError.prototype);
+  }
+}
+
+
+export class ValidationError extends AppError {
+  constructor(message: string) {
+    super(400, message);
+  }
+}
+
+
+export class UnauthorizedError extends AppError {
+  constructor(message: string = 'Unauthorized') {
+    super(401, message);
+  }
+}
+
+
+export class ForbiddenError extends AppError {
+  constructor(message: string = 'Forbidden') {
+    super(403, message);
+  }
+}
+
+
+export class NotFoundError extends AppError {
+  constructor(resource: string) {
+    super(404, `${resource} not found`);
+  }
+}
+
+
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super(409, message);
+  }
+}
+
+
+export class RateLimitError extends AppError {
+  constructor(message: string = 'Too many requests') {
+    super(429, message);
+  }
+}
+```
+
+
+### Global Error Handler
+```typescript
+// lib/utils/error-handler.ts
+
+
+export function handleError(error: unknown): Response {
+  if (error instanceof AppError) {
+    return new Response(
+      JSON.stringify({
+        error: error.message,
+        statusCode: error.statusCode,
+      }),
+      {
+        status: error.statusCode,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+  
+  if (error instanceof ZodError) {
+    return new Response(
+      JSON.stringify({
+        error: 'Validation failed',
+        details: error.errors,
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+  
+  // Unknown error
+  logger.error('Unhandled error', error as Error);
+  
+  return new Response(
+    JSON.stringify({
+      error: 'Internal server error',
+    }),
+    {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+      }
+    );
+}
+```
+
+
+---
+
+
+## ENVIRONMENT VARIABLES
+```bash
+# .env.local.example
+
+
+# Application
+NODE_ENV=development
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+
+# Auth0
+AUTH0_SECRET=your-auth0-secret
+AUTH0_BASE_URL=http://localhost:3000
+AUTH0_ISSUER_BASE_URL=https://your-tenant.auth0.com
+AUTH0_CLIENT_ID=your-client-id
+AUTH0_CLIENT_SECRET=your-client-secret
+
+
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+
+# Redis (Upstash)
+REDIS_URL=redis://default:your-password@your-endpoint.upstash.io:6379
+
+
+# Stripe
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+
+
+# Feature Flags
+NEXT_PUBLIC_DEMO_MODE=false
+NEXT_PUBLIC_ENABLE_PLAID=false
+NEXT_PUBLIC_ENABLE_YOUTUBE=false
+
+
+# Encryption
+ENCRYPTION_KEY=your-32-byte-encryption-key
+
+
+# Monitoring
+SENTRY_DSN=your-sentry-dsn
+NEXT_PUBLIC_SENTRY_DSN=your-public-sentry-dsn
+AXIOM_TOKEN=your-axiom-token
+AXIOM_DATASET=creator-hub
+
+
+# Email (Phase 2)
+SENDGRID_API_KEY=your-sendgrid-key
+EMAIL_FROM=noreply@creatorhub.com
+```
+
+
+---
+
+
+## DEVELOPMENT WORKFLOW
+
+
+### Initial Setup
+
+
+1. Clone repository
+2. Copy `.env.local.example` to `.env.local`
+3. Fill in environment variables
+4. Run `npm install`
+5. Run database migrations: `npm run db:migrate`
+6. Seed demo data: `npm run db:seed`
+7. Start dev server: `npm run dev`
+
+
+### Git Workflow
+
+
+- Create feature branch: `git checkout -b feature/transaction-list`
+- Make changes
+- Commit with conventional commits: `git commit -m "feat: add transaction list"`
+- Push and create PR
+- Wait for CI checks
+- Get approval
+- Merge to develop
+
+
+### Testing
+
+
+- Run tests: `npm run test`
+- Run tests with coverage: `npm run test:coverage`
+- Run specific test: `npm run test -- transactions.test.ts`
+
+
+### Database Migrations
+
+
+- Create migration: `npm run db:migration:create add_tax_settings`
+- Run migrations: `npm run db:migrate`
+- Rollback: `npm run db:rollback`
+
+
+---
+
+
+## PERFORMANCE REQUIREMENTS
+
+
+- Page load time: <2 seconds (desktop), <3 seconds (mobile)
+- API response time: <200ms (p95)
+- Database query time: <100ms (p95)
+- Time to first byte: <600ms
+- First contentful paint: <1.5s
+- Largest contentful paint: <2.5s
+
+
+---
+
+
+## SECURITY REQUIREMENTS
+
+
+- All API endpoints require authentication (except /api/auth, /api/health)
+- All database queries filtered by user_id
+- Input validation on all endpoints
+- Rate limiting: 100 req/min per user
+- HTTPS only (redirect HTTP → HTTPS)
+- Secure cookies (HttpOnly, Secure, SameSite=Lax)
+- SQL injection prevention (parameterized queries)
+- XSS prevention (React auto-escaping)
+- CSRF protection (SameSite cookies)
+- Secrets encrypted at rest
+- PII fields encrypted (tax_id, tokens)
+
+
+---
+
+
+## SCALABILITY REQUIREMENTS
+
+
+- Support 500 concurrent users (MVP)
+- Support 10k users (Phase 2)
+- Database: 10GB (MVP), 100GB (Phase 2)
+- Handle 100 req/s (MVP), 1000 req/s (Phase 2)
+- Horizontal scaling (Vercel auto-scales)
+- Caching strategy (Redis)
+- Database read replicas (Phase 2)
+- CDN for static assets (Vercel)
+
+
+---
+
+
+## CODE QUALITY REQUIREMENTS
+
+
+- TypeScript strict mode
+- ESLint + Prettier
+- 80% test coverage
+- No console.logs in production
+- No any types
+- Meaningful variable names
+- Functions <50 lines
+- Files <500 lines
+- DRY, KISS, YAGNI principles
+- SOLID principles for services
+- Separation of concerns
+
+
+---
+
+
+## ACCESSIBILITY REQUIREMENTS
+
+
+- WCAG 2.1 Level AA compliance
+- Semantic HTML
+- ARIA labels where needed
+- Keyboard navigation
+- Screen reader support
+- Focus indicators
+- Color contrast ratio ≥4.5:1
+- Responsive design (320px - 2560px)
+
+
+---
+
+
+## BROWSER SUPPORT
+
+
+- Chrome (last 2 versions)
+- Firefox (last 2 versions)
+- Safari (last 2 versions)
+- Edge (last 2 versions)
+- Mobile Safari iOS 14+
+- Chrome Android (latest)
+
+
+---
+
+
+## DELIVERY MILESTONES
+
+
+**Week 1:** Authentication + User Management
+**Week 2-3:** Transaction Management
+**Week 4:** Brand Deal Management
+**Week 5:** Tax Calculator
+**Week 6:** Invoice Generation
+**Week 7:** Analytics Dashboard
+**Week 8:** Integration (Stripe)
+**Week 9-10:** Demo Polish + UX
+**Week 11-12:** Testing + Performance
+
+
+---
+
+
+## SUCCESS CRITERIA
+
+
+- All MVP features functional
+- Demo runs without errors
+- Page load <2s
+- Mobile responsive
+- 80% test coverage
+- Zero security vulnerabilities
+- Deployable to production
+- Documentation complete
+
+
+---
+
+
+**This SRS provides all technical specifications needed for Cursor AI to begin development. Start with Module 1 (Authentication) and proceed sequentially through each module.**
+// feat: build analytics overview KPI cards
+// 2026-01-29T12:13:00
+
+// feat: support quarterly tax estimate by year and quarter
+// 2026-03-01T17:48:00
+
+// feat: add filing status single married head-of-household
+// 2026-03-31T12:23:00
+
+// feat: create error boundary and fallback UI
+// 2026-05-01T17:58:00
+
+// feat: prevent duplicate imports via event id
+// 2026-06-01T12:33:00
+
+// feat: add ARIA labels to interactive controls
+// 2026-07-01T17:08:00
+
+// feat: improve mobile chart responsiveness
+// 2026-08-01T12:43:00
+
+// feat: complete branding and demo mode polish
+// 2026-09-01T17:18:00

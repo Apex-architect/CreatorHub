@@ -1,0 +1,54 @@
+{
+  "name": "creator-business-hub",
+  "version": "1.0.0",
+  "description": "All-in-one business dashboard for content creators: income, expenses, brand deals, invoices and quarterly tax estimates.",
+  "author": "Code-X-Builder",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "dependencies": {
+    "@auth0/nextjs-auth0": "^3.4.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "@tanstack/react-query": "^5.17.0",
+    "@upstash/ratelimit": "^1.0.0",
+    "@upstash/redis": "^1.32.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.0.0",
+    "framer-motion": "^10.16.16",
+    "jspdf": "^2.5.1",
+    "next": "^14.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "stripe": "^14.10.0",
+    "tailwind-merge": "^2.2.0",
+    "zod": "^3.22.4",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "autoprefixer": "^10.4.17",
+    "eslint": "^8.56.0",
+    "eslint-config-next": "^14.1.0",
+    "jest": "^29.7.0",
+    "jest-fetch-mock": "^3.0.3",
+    "postcss": "^8.4.33",
+    "tailwindcss": "^3.4.1",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
